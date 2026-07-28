@@ -1,160 +1,158 @@
 # Code Walkthrough — Junimo Kart RL Bridge
 
-Dokumen ini menjelaskan code yang dibuat untuk project Junimo Kart Reinforcement Learning. Tujuannya supaya project ini tidak terasa seperti “vibe code”: setiap file punya alasan, alur data jelas, dan kamu bisa membaca ulang untuk memahami apa yang sebenarnya terjadi.
+This document explains the code in this project in detail. The purpose is to avoid "vibe coding": every file should have a reason, the data flow should be understandable, and future changes should be documented.
 
-Ke depan, setiap kali Codex menambah atau mengubah code di project ini, dokumen ini perlu ikut di-update dengan:
+Whenever code is added or changed, this document should be updated with:
 
-1. file apa yang berubah,
-2. fungsi perubahan itu,
-3. alur data/logika yang terpengaruh,
-4. cara menjalankan atau mengetesnya,
-5. caveat atau risiko yang perlu kamu tahu.
+1. which files changed,
+2. what the change does,
+3. which data flow or logic it affects,
+4. how to run or test it,
+5. caveats and risks.
 
-## Gambaran besar
+## High-level architecture
 
-Project ini terdiri dari dua sisi:
+The project has two main parts:
 
-1. SMAPI mod C# di dalam Stardew Valley.
-2. Python RL environment di luar game.
+1. a C# SMAPI mod running inside Stardew Valley;
+2. a Python reinforcement learning environment running outside the game.
 
-Alurnya:
+Data flow:
 
 ```text
 Python DQN agent
-  -> pilih action: release jump / hold jump
-  -> kirim JSON ke TCP bridge localhost
-  -> SMAPI mod menerima action
-  -> mod mengubah state jump internal Junimo Kart
-  -> game berjalan beberapa frame
-  -> mod membaca state internal Junimo Kart
-  -> Python menerima observation + hitung reward
-  -> DQN belajar dari pengalaman itu
+  -> chooses action: release jump / hold jump
+  -> sends JSON to the local TCP bridge
+  -> SMAPI mod receives the action
+  -> mod changes Junimo Kart's internal jump state
+  -> game advances for a few frames
+  -> mod reads Junimo Kart's internal state
+  -> Python receives an observation and computes reward
+  -> DQN learns from the transition
 ```
 
-Bridge memakai TCP lokal:
+The bridge listens on:
 
 ```text
 127.0.0.1:8765
 ```
 
-Format komunikasinya JSON-lines: satu JSON per baris.
+The protocol is JSON-lines: one JSON object per line.
 
-## Folder penting
+## Important folders
 
 ```text
-src/JunimoKartRLBridge/   SMAPI mod C#
-junimo_rl/                Python client + Gymnasium environment
-scripts/                  script smoke test, training, plotting, evaluation
-docs/                     dokumentasi detail code
-logs/                     output training
-models/                   final model
+src/JunimoKartRLBridge/   C# SMAPI mod
+junimo_rl/                Python TCP client and Gymnasium environment
+scripts/                  Smoke test, training, plotting, and evaluation scripts
+docs/                     Detailed project documentation
+logs/                     Training outputs, ignored by Git
+models/                   Saved models, ignored by Git
 ```
 
-Folder/file generated seperti `logs/`, `models/`, `bin/`, `obj/`, `.scratch/`, `__pycache__/`, dan `*.egg-info/` di-ignore oleh Git. Yang dipush ke GitHub adalah source code, script, config, dan dokumentasi; bukan model hasil training atau build artifact.
+Generated files such as `logs/`, `models/`, `bin/`, `obj/`, `.scratch/`, `__pycache__/`, and `*.egg-info/` are ignored by Git. The GitHub repository contains source code, scripts, configuration, and documentation, not trained models or build artifacts.
 
-## SMAPI mod C#
+## C# SMAPI mod
 
 ### `src/JunimoKartRLBridge/manifest.json`
 
-Manifest SMAPI. Ini file yang membuat SMAPI mengenali mod.
+This is the SMAPI manifest. SMAPI uses it to discover and load the mod.
 
-Isi penting:
+Important fields:
 
-- `Name`: nama mod.
-- `UniqueID`: ID unik mod.
-- `EntryDll`: DLL yang dijalankan SMAPI.
-- `MinimumApiVersion`: versi minimal SMAPI.
+- `Name`: display name of the mod.
+- `UniqueID`: unique mod ID.
+- `EntryDll`: DLL loaded by SMAPI.
+- `MinimumApiVersion`: minimum required SMAPI version.
 
-Kalau file ini salah, SMAPI tidak akan load mod.
+If this file is missing or invalid, SMAPI will not load the bridge.
 
 ### `src/JunimoKartRLBridge/JunimoKartRLBridge.csproj`
 
-Project file .NET untuk build mod.
+This is the .NET project file for the mod.
 
-Bagian penting:
+Important details:
 
-- target framework: `net6.0`, karena Stardew Valley 1.6 berjalan di .NET 6.
-- package `Pathoschild.Stardew.ModBuildConfig`, supaya build mod bisa otomatis deploy ke folder `Stardew Valley/Mods`.
-- `GamePath`, diarahkan ke instalasi Stardew lokal.
+- Target framework is `net6.0`, matching Stardew Valley 1.6.
+- `Pathoschild.Stardew.ModBuildConfig` handles SMAPI mod build/deploy behavior.
+- `GamePath` points to the local Stardew Valley installation.
 
-Command build:
+Build command:
 
 ```powershell
 dotnet build .\src\JunimoKartRLBridge\JunimoKartRLBridge.csproj -c Release
 ```
 
-Kalau Stardew sedang terbuka, deploy bisa gagal karena DLL sedang dikunci. Tutup game dulu.
+If Stardew Valley is running, the DLL in the Mods folder may be locked. Close the game before building if deployment fails.
 
 ### `src/JunimoKartRLBridge/Config.cs`
 
-Config mod yang bisa disimpan oleh SMAPI.
+Configuration for the mod.
 
-Field penting:
+Fields:
 
-- `BindAddress`: alamat TCP server, default `127.0.0.1`.
-- `Port`: port bridge, default `8765`.
-- `StartServerOnLaunch`: apakah bridge langsung hidup saat mod load.
-- `MaxTracks`: jumlah track depan yang dikirim ke Python.
-- `MaxEntities`: jumlah entity depan yang dikirim ke Python.
-- `LookaheadPixels`: jarak depan yang diamati agent.
-- `LookbehindPixels`: sedikit area belakang yang masih dikirim.
-- `AutoAdvanceTitleAfterStart`: auto-skip layar Title Junimo Kart setelah start.
-- `AutoContinueProgressModeNonGameplayStates`: auto-continue state non-gameplay seperti Title/Map/Cutscene.
-- `ForceRunWhenUnfocused`: memaksa opsi Stardew `pauseWhenOutOfFocus` menjadi `false`, supaya game tetap berjalan saat window tidak aktif.
-
-Tujuan config ini: membuat behavior bridge bisa diubah tanpa hardcode ulang.
+- `BindAddress`: TCP bind address, default `127.0.0.1`.
+- `Port`: TCP port, default `8765`.
+- `StartServerOnLaunch`: starts the bridge automatically when the mod loads.
+- `MaxTracks`: number of track entries sent to Python.
+- `MaxEntities`: number of entity entries sent to Python.
+- `LookaheadPixels`: how far ahead of the cart the snapshot should include objects.
+- `LookbehindPixels`: how far behind the cart to keep context.
+- `AutoAdvanceTitleAfterStart`: automatically moves past the Junimo Kart title state.
+- `AutoContinueProgressModeNonGameplayStates`: automatically skips non-gameplay states such as Title, Map, and Cutscene during Progress Mode.
+- `ForceRunWhenUnfocused`: forces Stardew's `pauseWhenOutOfFocus` option to `false`, so training continues when the game window is not focused.
 
 ### `src/JunimoKartRLBridge/BridgeServer.cs`
 
-TCP server lokal yang menerima request dari Python.
+This file implements the TCP server.
 
-Tanggung jawab:
+Responsibilities:
 
-- listen di `127.0.0.1:8765`,
-- menerima koneksi Python,
-- membaca JSON line-by-line,
-- parse request,
-- panggil `ModEntry.HandleBridgeRequest`,
-- kirim response JSON.
+- listen on `127.0.0.1:8765`;
+- accept a Python client connection;
+- read JSON-lines requests;
+- deserialize them into `ClientRequest`;
+- call `ModEntry.HandleBridgeRequest`;
+- write JSON-lines responses back to Python.
 
-Bridge ini berjalan di background thread. Karena Stardew game state tidak aman dimutasi dari thread TCP langsung, perubahan seperti start/reset/jump disimpan sebagai pending state, lalu diproses pada main update tick Stardew di `ModEntry`.
+The TCP server runs on a background thread. It does not directly mutate Stardew game state. Instead, it sets pending values that are later processed on the main Stardew update tick. This avoids touching game state from the wrong thread.
 
 ### `src/JunimoKartRLBridge/Protocol.cs`
 
-Berisi class data untuk request/response JSON.
+This file contains DTO classes used by the JSON protocol.
 
-Class penting:
+Important classes:
 
 - `ClientRequest`
-  - `Type`: `ping`, `state`, `start`, `reset`, `action`, `advance`.
-  - `Mode`: `progress` atau `endless`.
-  - `Jump`: `true` untuk tahan lompat, `false` untuk lepas.
+  - `Type`: `ping`, `state`, `start`, `reset`, `action`, or `advance`.
+  - `Mode`: `progress`, `endless`, or `infinite`.
+  - `Jump`: `true` means hold jump, `false` means release jump.
 
 - `BridgeResponse`
-  - `Ok`: request berhasil atau tidak.
-  - `Type`: jenis response.
-  - `Message`: pesan opsional.
-  - `State`: snapshot game.
+  - `Ok`: whether the request succeeded.
+  - `Type`: response type.
+  - `Message`: optional message.
+  - `State`: latest game snapshot.
 
 - `BridgeSnapshot`
-  - semua state Junimo Kart yang dikirim ke Python.
+  - score, lives, level, game state, player state, tracks ahead, entities ahead.
 
 - `PlayerSnapshot`
-  - posisi, velocity, grounded/jumping, bounds player.
+  - player position, velocity, bounds, grounded/jumping state.
 
 - `TrackSnapshot`
-  - posisi track depan, tipe track, obstacle di track.
+  - track position, distance from player, track type, obstacle information.
 
 - `EntitySnapshot`
-  - coin, fruit, obstacle, dekor, dan entity lain di depan kart.
+  - pickups, obstacles, coins, fruit, and other entities near the player.
 
 ### `src/JunimoKartRLBridge/ReflectionUtil.cs`
 
-Helper untuk membaca/menulis field private Stardew Valley.
+This helper reads and writes private Stardew Valley fields and methods.
 
-Kenapa perlu reflection?
+Why reflection is needed:
 
-Junimo Kart menyimpan banyak state penting sebagai private field, misalnya:
+Junimo Kart stores important information in non-public fields, such as:
 
 - `player`
 - `_tracks`
@@ -163,21 +161,21 @@ Junimo Kart menyimpan banyak state penting sebagai private field, misalnya:
 - `gameState`
 - `levelsBeat`
 
-SMAPI mod tidak bisa mengakses field private langsung dengan normal C#. `ReflectionUtil` mencari field/method tersebut via reflection dan cache hasil pencariannya supaya tidak lambat setiap frame.
+Normal C# code cannot directly access those fields. Reflection allows the mod to inspect them at runtime. Reflection lookups are cached for performance.
 
-Fungsi penting:
+Important functions:
 
-- `Field(target, name)`: baca field private/public.
-- `Field<T>(target, name)`: baca field dan convert ke tipe tertentu.
-- `SetField(target, name, value)`: tulis field private/public.
-- `Invoke(target, name, args)`: panggil method private/public.
-- `BoolMethod(target, name)`: panggil method boolean.
-- `VectorField(target, name)`: baca `Vector2`.
-- `Bounds(target)`: panggil `GetBounds()` dan convert ke DTO.
-- `Enumerate(value)`: flatten list/dictionary internal Stardew.
-- `InheritsTypeName(value, typeName)`: cek class inheritance berdasarkan nama.
+- `Field(target, name)`: reads a field.
+- `Field<T>(target, name)`: reads a field and converts it to a type.
+- `SetField(target, name, value)`: writes a field.
+- `Invoke(target, name, args)`: calls a method.
+- `BoolMethod(target, name)`: calls a method returning a boolean.
+- `VectorField(target, name)`: reads an XNA `Vector2`.
+- `Bounds(target)`: calls `GetBounds()` and converts the result.
+- `Enumerate(value)`: flattens lists and dictionaries.
+- `InheritsTypeName(value, typeName)`: checks inheritance by type name.
 
-Bagian paling penting untuk bug jump:
+The jump-control fix depends on these internal calls:
 
 ```text
 SetField(mineCart, "isJumpPressed", desiredJump)
@@ -185,87 +183,89 @@ Invoke(player, "QueueJump")
 Invoke(player, "ReleaseJump")
 ```
 
-Awalnya bridge mencoba `receiveKeyPress(Keys.Space)`, tapi Junimo Kart tidak memakai method itu untuk jump. Fix-nya adalah mengubah state jump internal langsung.
+The earlier approach used `receiveKeyPress(Keys.Space)`, but Junimo Kart does not use that method for jump input. The fixed version changes the internal jump state directly.
 
 ### `src/JunimoKartRLBridge/ModEntry.cs`
 
-File utama mod.
+This is the main mod file.
 
-Tanggung jawab:
+Responsibilities:
 
-1. load config,
-2. start TCP bridge,
-3. handle request dari Python,
-4. start Junimo Kart Progress Mode,
-5. auto-continue Title/Map/Cutscene,
-6. memastikan game tidak pause saat window tidak fokus,
-7. apply action jump,
-8. buat snapshot observation.
+1. load config;
+2. start the TCP bridge;
+3. handle Python requests;
+4. start Junimo Kart Progress Mode;
+5. auto-continue non-gameplay states;
+6. keep the game running while unfocused;
+7. apply jump actions;
+8. build observations.
 
 #### Entry point
 
-`Entry(IModHelper helper)` dipanggil SMAPI saat mod load.
+`Entry(IModHelper helper)` runs when SMAPI loads the mod.
 
-Yang dilakukan:
+It:
 
-- baca config,
-- register event `GameLoop.UpdateTicked`,
-- register console command `jkrl_start`,
-- register console command `jkrl_release`,
-- start `BridgeServer`.
+- reads config;
+- registers `GameLoop.UpdateTicked`;
+- registers console command `jkrl_start`;
+- registers console command `jkrl_release`;
+- starts the bridge server.
 
 #### Request handling
 
-`HandleBridgeRequest(ClientRequest? request)` menerima request dari TCP server.
+`HandleBridgeRequest(ClientRequest? request)` processes commands sent by Python.
 
-Request penting:
+Supported requests:
 
-- `ping`: cek bridge hidup.
-- `state`: ambil snapshot terakhir.
-- `start` / `reset`: minta Junimo Kart Progress Mode dimulai ulang.
-- `action`: set target jump held/released.
-- `advance`: minta mod lanjut dari state non-gameplay ke gameplay.
+- `ping`: check whether the bridge is alive.
+- `state`: return the latest snapshot.
+- `start` / `reset`: request a new Junimo Kart run.
+- `action`: set desired jump state.
+- `advance`: request progress from Title/Map/Cutscene into gameplay.
 
-#### Kenapa ada pending state?
+#### Pending state
 
-TCP server berjalan di thread terpisah. Stardew game state harus disentuh dari game update thread. Jadi request tidak langsung mengubah game, tapi menulis:
+The TCP server thread should not directly change game state. Instead it stores pending values:
 
 - `pendingStartMode`
 - `pendingAdvance`
 - `desiredJumpHeld`
 
-Lalu `OnUpdateTicked` membaca pending state dan menerapkannya secara aman.
+`OnUpdateTicked` reads these values and applies them on the main game thread.
 
-#### Start Junimo Kart
+#### Starting Junimo Kart
 
-`StartMineCart(string mode)` membuat instance minigame:
+`StartMineCart(string mode)` creates the minigame:
 
 ```csharp
 Game1.currentMinigame = new MineCart(0, modeId);
 ```
 
-Mode:
+Mode IDs:
 
-- `2`: Progress Mode.
-- `3`: Infinite/Endless Mode.
+```text
+2 = Progress Mode
+3 = Infinite / Endless Mode
+```
 
-Untuk target arcade machine, yang dipakai adalah Progress Mode.
+The arcade-machine goal uses Progress Mode.
 
 #### Run while unfocused
 
-`EnsureRunsWhenUnfocused()` mematikan opsi internal Stardew:
+`EnsureRunsWhenUnfocused()` sets:
 
 ```csharp
 Game1.options.pauseWhenOutOfFocus = false;
 ```
 
-Tanpa ini, game bisa pause/freeze ketika kamu klik aplikasi lain. Training RL butuh game loop tetap berjalan, jadi bridge memaksa opsi ini off selama mod aktif. Ini tidak selalu menjamin game tetap berjalan kalau window diminimize total, karena OS/renderer masih bisa melakukan throttling. Untuk training stabil, lebih aman gunakan Windowed/Borderless dan biarkan window Stardew tetap terbuka walau tidak aktif.
+This helps training continue while Stardew is not the active window. It may still be best not to fully minimize the game window, since rendering or update throttling can still happen depending on OS/window behavior.
 
 #### Auto-continue
 
-`AutoContinueNonGameplayStates` dan `ForceProgressModeGameplay` memastikan training tidak nyangkut di layar Title/Map/Cutscene.
+`AutoContinueNonGameplayStates` and `ForceProgressModeGameplay` prevent training from getting stuck outside gameplay.
 
-State internal Junimo Kart:
+Junimo Kart game states:
 
 ```text
 0 = Title
@@ -277,124 +277,131 @@ State internal Junimo Kart:
 
 Logic:
 
-- kalau Title, panggil `restartLevel(true)`;
-- kalau Map, panggil `ShowCutscene()`;
-- kalau Cutscene, panggil `EndCutscene()`;
-- kalau Ingame, biarkan agent main.
+- Title -> call `restartLevel(true)`;
+- Map -> call `ShowCutscene()`;
+- Cutscene -> call `EndCutscene()`;
+- Ingame -> let the agent play.
 
-#### Apply jump
+#### Applying jump
 
-`ApplyJump(MineCart mineCart, bool desiredJump)` adalah fungsi yang mengubah action Python menjadi behavior game.
+`ApplyJump(MineCart mineCart, bool desiredJump)` converts the Python action into game behavior.
 
-Logic:
+It:
 
-- set `isJumpPressed` sesuai action,
-- kalau baru mulai hold jump, panggil `QueueJump()`,
-- kalau baru release jump, panggil `ReleaseJump()`.
+1. sets `isJumpPressed`;
+2. calls `QueueJump()` when jump starts;
+3. calls `ReleaseJump()` when jump ends.
 
-Action space Python:
+Python action space:
 
 ```text
 0 = release jump
 1 = hold jump
 ```
 
-#### Snapshot observation
+Jump duration emerges from repeated actions. For example:
 
-`CreateSnapshot` membaca internal state:
+```text
+1, 1, 1, 1, 0
+```
 
-- score,
-- lives,
-- level,
-- game state,
-- current theme,
-- player position,
-- player velocity,
-- grounded/jumping,
-- track depan,
-- entity depan seperti coin/fruit/obstacle.
+means the agent held jump for four environment steps and then released it.
 
-Track dan entity difilter agar hanya yang dekat dengan player dikirim ke Python. Ini menjaga observation tetap kecil dan relevan.
+#### Snapshot creation
+
+`CreateSnapshot` reads internal game state:
+
+- score;
+- lives;
+- levels beaten;
+- game mode;
+- current theme;
+- game state;
+- player position;
+- player velocity;
+- grounded/jumping state;
+- tracks ahead;
+- entities ahead.
+
+Tracks and entities are filtered to a window around the player to keep observations small and relevant.
 
 ## Python package
 
 ### `junimo_rl/client.py`
 
-Client TCP sederhana untuk bicara dengan mod.
+This is the TCP client used by Python.
 
-Method penting:
+Important methods:
 
-- `connect()`: buka koneksi TCP.
-- `request(payload)`: kirim JSON dan baca response.
-- `ping()`: cek bridge hidup.
-- `state()`: ambil state terakhir.
-- `start(mode="progress")`: start Progress Mode.
-- `advance()`: paksa lanjut dari non-gameplay state.
-- `action(jump: bool)`: kirim action jump.
+- `connect()`: opens the TCP connection.
+- `request(payload)`: sends JSON and reads JSON response.
+- `ping()`: checks bridge availability.
+- `state()`: gets latest snapshot.
+- `start(mode="progress")`: starts Progress Mode.
+- `advance()`: asks the bridge to move from non-gameplay state to gameplay.
+- `action(jump: bool)`: sends hold/release jump.
 
-Semua request dikirim sebagai satu baris JSON.
-
-Contoh:
+Example request:
 
 ```json
 {"type":"action","jump":true}
 ```
 
-Client juga punya retry ringan: kalau koneksi TCP putus saat request, client menutup socket lama, reconnect, lalu retry request sekali. Ini membantu saat bridge sempat reset. Kalau Stardew/SMAPI memang sudah ditutup, error dibuat lebih jelas: buka Stardew lewat SMAPI dan load save dulu.
+The client retries once if the TCP connection breaks. If Stardew/SMAPI is closed, it raises a clearer error telling the user to open Stardew through SMAPI and load a save.
 
 ### `junimo_rl/env.py`
 
-Gymnasium environment untuk RL.
+This is the Gymnasium environment used by Stable-Baselines3.
 
-Stable-Baselines3 butuh environment dengan interface:
+Stable-Baselines3 expects:
 
-- `reset()`
-- `step(action)`
-- `observation_space`
-- `action_space`
+- `reset()`;
+- `step(action)`;
+- `observation_space`;
+- `action_space`.
 
 #### Observation vector
 
-Game state dari JSON tidak langsung bisa dipakai neural network. Maka `snapshot_to_vector` mengubahnya menjadi array angka `np.float32`.
+The raw JSON snapshot is converted into a fixed-size `np.float32` vector by `snapshot_to_vector`.
 
-Isi vector:
+The vector contains:
 
 1. base features:
-   - inMinigame,
-   - score,
-   - lives,
-   - levelsBeat,
-   - gameMode,
-   - gameState,
-   - gameOver,
-   - completed,
-   - jumpHeld,
-   - player position,
-   - player velocity,
-   - grounded/jumping.
+   - whether the minigame is active;
+   - score;
+   - lives;
+   - levels beaten;
+   - game mode;
+   - game state;
+   - game over flag;
+   - completed flag;
+   - jump held flag;
+   - player position;
+   - player velocity;
+   - grounded/jumping flags.
 
 2. track features:
-   - jarak track dari player (`dx`),
-   - posisi y,
-   - tipe track,
-   - ada obstacle atau tidak,
-   - tipe obstacle.
+   - distance from player (`dx`);
+   - y position;
+   - track type;
+   - obstacle flag;
+   - obstacle type.
 
 3. entity features:
-   - jarak entity,
-   - posisi y,
-   - ukuran bounds,
-   - tipe entity,
-   - obstacle/pickup flag.
+   - distance from player;
+   - y position;
+   - bounds size;
+   - entity type;
+   - obstacle/pickup flags.
 
-Jumlah track/entity dibatasi:
+Limits:
 
 ```text
 MAX_TRACKS = 24
 MAX_ENTITIES = 24
 ```
 
-Kalau jumlah aktual kurang, sisanya diisi nol. Ini penting karena neural network perlu input size tetap.
+If there are fewer entries, the rest are padded with zeros. Neural networks need a fixed input size.
 
 #### Action space
 
@@ -402,7 +409,7 @@ Kalau jumlah aktual kurang, sisanya diisi nol. Ini penting karena neural network
 spaces.Discrete(2)
 ```
 
-Artinya hanya ada dua action:
+Meaning:
 
 ```text
 0 = release jump
@@ -413,85 +420,89 @@ Artinya hanya ada dua action:
 
 `reset()`:
 
-1. kirim `start progress`,
-2. tunggu sampai game benar-benar `Ingame`,
-3. kalau masih Title/Map/Cutscene, kirim `advance`,
-4. return observation awal.
+1. sends `start progress`;
+2. waits until Junimo Kart is actually in gameplay;
+3. sends `advance` if the game is still in Title/Map/Cutscene;
+4. returns the first observation.
 
 #### Step
 
 `step(action)`:
 
-1. ambil snapshot lama,
-2. kirim action jump,
-3. tunggu beberapa frame sesuai `frame_skip`,
-4. ambil snapshot baru,
-5. hitung reward,
-6. return `(obs, reward, terminated, truncated, info)`.
+1. stores the previous snapshot;
+2. sends the jump action;
+3. waits `frame_skip / fps` seconds;
+4. reads the new snapshot;
+5. computes reward;
+6. returns `(obs, reward, terminated, truncated, info)`.
 
-#### Reward logic
+#### Reward function
 
-Reward dihitung di `_reward`.
+Current reward:
 
-Komponen:
+```text
+reward =
+  0.001 * delta_x
++ 0.01  * delta_score
++ 50    * max(delta_level, 0)
++ 10    * delta_life
++ 250   if Progress Mode is completed
+- 100   if game over just happened
+- 1     if the minigame is no longer active
+```
 
-- maju ke kanan (`dx`): reward kecil positif,
-- score naik: reward positif,
-- level selesai: reward besar,
-- life berkurang: reward negatif,
-- Progress Mode selesai: reward sangat besar,
-- game over: penalti besar.
+Interpretation:
 
-Tujuannya supaya agent belajar:
+- moving forward is mildly good;
+- gaining score is good;
+- beating a level is very good;
+- completing Progress Mode is excellent;
+- losing lives and game over are bad.
 
-- bergerak sejauh mungkin,
-- jangan mati,
-- ambil score/coin kalau mungkin,
-- selesaikan level,
-- akhirnya complete Progress Mode.
+There is no explicit penalty for missing a coin or fruit. The agent simply does not get the score reward.
 
 ## Scripts
 
 ### `scripts/smoke_test.py`
 
-Script sanity check.
+Sanity-check script.
 
-Gunanya:
+Use it to:
 
-- cek bridge bisa di-ping,
-- optional start Junimo Kart,
-- optional hold jump untuk test apakah kart benar-benar lompat,
-- print JSON state.
+- ping the bridge;
+- start Junimo Kart;
+- print the internal snapshot;
+- optionally hold jump for a short time.
 
-Contoh:
+Example:
 
 ```powershell
 python .\scripts\smoke_test.py --start --hold 0.4
 ```
 
-Kalau jump berhasil, di output `duringHold` harus terlihat `jumpHeld: true`, dan biasanya `player.jumping` atau `velocity.y` berubah.
+If jump control works, the cart should visibly jump and the `duringHold` state should show `jumpHeld: true`.
 
 ### `scripts/train_dqn.py`
 
-Script training DQN.
+Training script using Stable-Baselines3 DQN.
 
-Fitur:
+Features:
 
-- training berdasarkan timestep atau episode,
-- save final model,
-- save monitor CSV,
-- save TensorBoard logs,
-- save checkpoint per timestep,
-- save checkpoint per episode,
-- bisa continue dari model lama.
+- train by timesteps or episodes;
+- save final model;
+- save monitor CSV;
+- save TensorBoard logs;
+- save checkpoints by timestep;
+- save checkpoints by episode;
+- continue from an existing model.
 
-Command contoh:
+Example:
 
 ```powershell
 python .\scripts\train_dqn.py --episodes 1000 --save-episode-freq 100 --model-path models\junimo_dqn --run-name ep_compare_01
 ```
 
-Output:
+Outputs:
 
 ```text
 logs/ep_compare_01/monitor.csv
@@ -503,29 +514,27 @@ models/junimo_dqn.zip
 
 #### `EpisodeCheckpointCallback`
 
-Callback custom untuk save model setiap N episode.
+This custom callback saves model checkpoints every N completed episodes.
 
-Kenapa dibuat?
+Stable-Baselines3 already has timestep-based checkpoints. This project also needs episode-based checkpoints so models like "episode 1000", "episode 2000", and "episode 10000" can be compared directly.
 
-Stable-Baselines3 default checkpoint berdasarkan timestep. Kamu ingin compare “model episode 100 vs 1000 vs 10000”, jadi checkpoint episode lebih cocok.
-
-Nama checkpoint:
+Checkpoint names:
 
 ```text
-junimo_dqn_ep000100_steps12345.zip
-junimo_dqn_ep001000_steps99999.zip
+junimo_dqn_ep001000_steps58633.zip
+junimo_dqn_ep002000_steps119000.zip
 ```
 
 ### `scripts/plot_training.py`
 
-Membuat line chart dari `monitor.csv`.
+Plots the training curve from `monitor.csv`.
 
-Chart yang dibuat:
+It creates:
 
-- episode reward,
-- rolling mean reward,
-- episode length,
-- rolling mean length.
+- episode reward;
+- rolling mean reward;
+- episode length;
+- rolling mean episode length.
 
 Command:
 
@@ -541,9 +550,9 @@ logs/ep_compare_01/training_plot.png
 
 ### `scripts/evaluate_models.py`
 
-Membandingkan beberapa checkpoint secara deterministic.
+Evaluates one or more checkpoints deterministically.
 
-Training memakai exploration/random. Evaluation sebaiknya deterministic supaya model dibandingkan lebih adil.
+Training uses exploration/randomness. Evaluation should be deterministic so checkpoints are compared more fairly.
 
 Command:
 
@@ -551,113 +560,138 @@ Command:
 python .\scripts\evaluate_models.py ".\logs\ep_compare_01\checkpoints\junimo_dqn_ep*.zip" --episodes 20 --out logs\ep_compare_01\evaluation.csv
 ```
 
-Output CSV berisi:
+Output columns:
 
-- model path,
-- jumlah episode evaluasi,
-- mean reward,
-- mean episode length,
-- completion rate,
-- max levels beat.
+- model path;
+- number of evaluation episodes;
+- mean reward;
+- mean episode length;
+- completion rate;
+- max levels beaten.
 
-Evaluator tetap membutuhkan Stardew + SMAPI + bridge hidup, sama seperti training. Kalau game ditutup di tengah evaluasi, script akan berhenti dengan pesan singkat yang meminta kamu membuka Stardew via SMAPI dan load save lagi.
+Evaluation still requires Stardew + SMAPI + bridge to be running. If the game closes, the script stops with a clear message.
 
-## Troubleshooting umum
+## Mathematical learning logic
 
-### `ConnectionResetError [WinError 10054]`
-
-Artinya koneksi Python ke bridge SMAPI diputus oleh sisi game/mod. Penyebab paling umum:
-
-1. Stardew/SMAPI ditutup.
-2. Game kembali ke title screen atau save belum loaded.
-3. Bridge belum listen di `127.0.0.1:8765`.
-4. Mod belum ter-load setelah build/restart.
-
-Cek cepat:
-
-```powershell
-Get-Process | Where-Object { $_.ProcessName -like '*Stardew*' }
-Test-NetConnection -ComputerName 127.0.0.1 -Port 8765
-```
-
-Kalau `TcpTestSucceeded` false, buka ulang Stardew lewat SMAPI, load save, lalu ulang command Python.
-
-## Cara DQN belajar
-
-DQN mencoba mempelajari fungsi:
+DQN learns:
 
 ```text
 Q(state, action)
 ```
 
-Maknanya:
+This estimates the expected future reward if the agent takes an action from the current state.
+
+The total discounted return is:
 
 ```text
-Seberapa bagus action tertentu jika dilakukan dari state sekarang?
+G_t = r_t + gamma * r_{t+1} + gamma^2 * r_{t+2} + ...
 ```
 
-Contoh:
+The Bellman target used by DQN is:
 
 ```text
-State:
-- kart grounded,
-- velocity X stabil,
-- gap 200 pixel di depan,
-- track berikutnya lebih tinggi.
-
-Action:
-- release jump
-- hold jump
+target = r + gamma * max_a' Q(next_state, a')
 ```
 
-DQN mencoba menebak action mana yang menghasilkan reward masa depan lebih tinggi.
-
-Awalnya neural network belum tahu apa-apa, jadi agent banyak random. Ini disebut exploration.
-
-Setiap step:
-
-1. agent melihat observation,
-2. agent memilih action,
-3. game merespons,
-4. environment menghitung reward,
-5. pengalaman disimpan ke replay buffer,
-6. DQN sampling pengalaman lama,
-7. neural network diupdate agar prediksi Q lebih dekat dengan reward aktual + prediksi masa depan.
-
-Secara intuisi:
+The network is trained to reduce:
 
 ```text
-Kalau action A sering bikin mati, Q(A) turun.
-Kalau action B sering bikin bertahan lebih lama / score naik / level selesai, Q(B) naik.
+loss = (Q(state, action) - target)^2
 ```
 
-## Hyperparameter penting
+With two actions, the network outputs two values:
+
+```text
+Q(state, release)
+Q(state, hold)
+```
+
+The agent usually picks:
+
+```text
+argmax_a Q(state, a)
+```
+
+but during exploration it sometimes picks a random action.
+
+## Why random levels can still be learned
+
+The model does not memorize a sequence of jumps.
+
+It learns a mapping:
+
+```text
+observation -> action
+```
+
+Even if the level layout changes, similar situations appear repeatedly:
+
+- gap nearby;
+- landing track is higher;
+- landing track is lower;
+- obstacle is ahead;
+- cart is airborne and falling;
+- cart is grounded and approaching a gap.
+
+The neural network learns which action tends to work in those situations.
+
+## Track representation
+
+Tracks are not represented as one long rail. The game stores them as many small track pieces.
+
+Example:
+
+```text
+track 1: x=0,   y=160, type=Straight
+track 2: x=16,  y=160, type=Straight
+track 3: x=32,  y=160, type=Straight
+track 4: x=48,  y=160, type=Straight
+track 5: x=64,  y=144, type=UpSlope
+track 6: x=80,  y=128, type=UpSlope
+```
+
+A gap appears when there is a large jump in `dx` between track pieces:
+
+```text
+dx=16
+dx=32
+dx=48
+dx=160
+dx=176
+```
+
+The current model receives this raw list. A future improvement would add semantic features like:
+
+```text
+next_gap_start
+next_gap_width
+landing_y
+landing_height_delta
+next_obstacle_dx
+next_obstacle_type
+```
+
+That would make learning easier.
+
+## Hyperparameters
 
 ### `--episodes`
 
-Target jumlah episode.
+Number of completed episodes to train for.
 
-Contoh:
-
-```powershell
---episodes 1000
-```
-
-Cocok kalau kamu ingin compare model berdasarkan episode.
-
-Jika menjalankan ulang training dari model lama, `--episodes` berarti jumlah episode tambahan di run baru, bukan total kumulatif.
+If continuing from an existing model, this is the number of additional episodes for the new run.
 
 ### `--episode-offset`
 
-Episode awal untuk penamaan checkpoint saat melanjutkan training.
+Used for cumulative checkpoint names when continuing training.
 
-Contoh: kamu sudah punya model 1000 episode, lalu ingin lanjut 9000 episode lagi dan checkpoint berikutnya dinamai 2000, 3000, dst:
+Example:
 
 ```powershell
 python .\scripts\train_dqn.py --load-model models\junimo_dqn.zip --episodes 9000 --episode-offset 1000 --save-episode-freq 1000 --model-path models\junimo_dqn --run-name continue_to_10k
 ```
 
-Dengan `--episode-offset 1000`, callback checkpoint mulai menghitung dari 1000, sehingga setelah 1000 episode tambahan file pertama bernama sekitar:
+The first new checkpoint will be named around:
 
 ```text
 junimo_dqn_ep002000_steps....zip
@@ -665,44 +699,34 @@ junimo_dqn_ep002000_steps....zip
 
 ### `--timesteps`
 
-Target jumlah step RL.
+Number of RL environment steps.
 
-Kalau `--episodes` dipakai, script stop berdasarkan episode dan timesteps dibuat sangat besar secara internal.
+If `--episodes` is used, the script stops based on completed episodes instead.
 
 ### `--save-episode-freq`
 
-Save model setiap N episode.
-
-Contoh:
-
-```powershell
---save-episode-freq 100
-```
+Save model every N completed episodes.
 
 ### `--save-freq`
 
-Save model setiap N timestep.
-
-Ini checkpoint tambahan berbasis step.
+Save model every N timesteps.
 
 ### `--frame-skip`
 
-Agent memilih action setiap N frame.
+The agent chooses an action every N frames.
 
-- lebih kecil: kontrol lebih presisi, training lebih lambat;
-- lebih besar: training lebih cepat, tapi timing lompat lebih kasar.
+- lower value: more precise control, slower training;
+- higher value: faster training, rougher jump timing.
 
-Default:
+Recommended for Junimo Kart:
 
 ```text
-4
+2
 ```
-
-Untuk Junimo Kart, `2` mungkin lebih responsif.
 
 ### `--learning-rate`
 
-Seberapa besar update neural network setiap training step.
+How large neural network updates are.
 
 Default:
 
@@ -710,11 +734,11 @@ Default:
 1e-4
 ```
 
-Kalau training tidak stabil, coba `5e-5`.
+Try `5e-5` if learning is unstable.
 
 ### `--exploration-fraction`
 
-Porsi training saat agent masih menurunkan random action dari tinggi ke rendah.
+Fraction of training where epsilon decays from high randomness to final randomness.
 
 Default:
 
@@ -722,11 +746,11 @@ Default:
 0.25
 ```
 
-Kalau agent terlalu cepat “percaya diri” padahal belum jago, naikkan ke `0.5`.
+Try `0.5` if the agent needs more exploration.
 
 ### `--exploration-final-eps`
 
-Random action minimum setelah exploration turun.
+Minimum probability of random action after exploration decays.
 
 Default:
 
@@ -734,11 +758,11 @@ Default:
 0.05
 ```
 
-Untuk level procedural/bervariasi, `0.1` bisa dicoba.
+Try `0.1` for more persistent exploration.
 
 ### `--buffer-size`
 
-Jumlah pengalaman yang disimpan replay buffer.
+Replay buffer size.
 
 Default:
 
@@ -746,11 +770,11 @@ Default:
 50000
 ```
 
-Lebih besar berarti agent bisa belajar dari sejarah lebih panjang, tapi memakai lebih banyak memori.
+Try `100000` for longer training.
 
 ### `--learning-starts`
 
-Jumlah timestep awal sebelum DQN mulai update network.
+Number of timesteps before DQN starts training the network.
 
 Default:
 
@@ -758,48 +782,97 @@ Default:
 2000
 ```
 
-Tujuannya agar replay buffer terisi pengalaman dulu.
+This allows the replay buffer to collect some experience first.
 
-## Cara run yang direkomendasikan
+## Recommended run sequence
 
-Setelah patch jump aktif dan Stardew dibuka via SMAPI:
+1. Close Stardew Valley.
+2. Build the mod:
+
+```powershell
+dotnet build .\src\JunimoKartRLBridge\JunimoKartRLBridge.csproj -c Release
+```
+
+3. Open Stardew through SMAPI.
+4. Load a save.
+5. Smoke-test bridge and jump:
 
 ```powershell
 python .\scripts\smoke_test.py --start --hold 0.4
 ```
 
-Pastikan kart lompat.
-
-Lalu training episode checkpoint:
+6. Train:
 
 ```powershell
-python .\scripts\train_dqn.py --episodes 1000 --save-episode-freq 100 --frame-skip 2 --model-path models\junimo_dqn --run-name ep_compare_01
+python .\scripts\train_dqn.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --model-path models\junimo_dqn --run-name fresh_10k
 ```
 
-Plot:
+7. Plot:
 
 ```powershell
-python .\scripts\plot_training.py .\logs\ep_compare_01\monitor.csv
+python .\scripts\plot_training.py .\logs\fresh_10k\monitor.csv
 ```
 
-Evaluate checkpoints:
+8. Evaluate checkpoints:
 
 ```powershell
-python .\scripts\evaluate_models.py ".\logs\ep_compare_01\checkpoints\junimo_dqn_ep*.zip" --episodes 20 --out logs\ep_compare_01\evaluation.csv
+python .\scripts\evaluate_models.py ".\logs\fresh_10k\checkpoints\junimo_dqn_ep*.zip" --episodes 20 --out logs\fresh_10k\evaluation.csv
 ```
 
-## Caveat saat ini
+## Troubleshooting
 
-1. Training masih real-time di game asli, jadi lambat.
-2. DQN murni dari nol mungkin butuh sangat banyak episode.
-3. Reward shaping masih sederhana.
-4. Agent hanya punya dua action: hold/release jump.
-5. Model lama sebelum fix jump sebaiknya tidak dipercaya, karena action jump kemungkinan belum benar-benar memengaruhi kart.
+### `ConnectionResetError [WinError 10054]`
 
-## Ide improvement berikutnya
+Python lost connection to the SMAPI bridge.
 
-1. Tambah rule-based heuristic teacher untuk warm start.
-2. Tambah observation yang lebih semantik, misalnya “gap distance” dan “landing track y”.
-3. Tambah accelerated mode di mod agar training tidak real-time.
-4. Tambah curriculum: mulai dari level/gap sederhana dulu.
-5. Simpan replay/evaluation video atau screenshot untuk debugging.
+Common causes:
+
+1. Stardew/SMAPI was closed.
+2. The save is not loaded.
+3. The bridge is not listening on `127.0.0.1:8765`.
+4. The mod did not load after build/restart.
+
+Check:
+
+```powershell
+Get-Process | Where-Object { $_.ProcessName -like '*Stardew*' }
+Test-NetConnection -ComputerName 127.0.0.1 -Port 8765
+```
+
+If `TcpTestSucceeded` is false, reopen Stardew through SMAPI, load a save, then rerun the Python command.
+
+### The game freezes when clicking another window
+
+Disable Stardew's "pause when unfocused" setting. The mod also tries to force:
+
+```csharp
+Game1.options.pauseWhenOutOfFocus = false;
+```
+
+For best stability, keep Stardew in Windowed or Borderless mode and avoid fully minimizing it.
+
+### The cart does not jump
+
+Run:
+
+```powershell
+python .\scripts\smoke_test.py --start --hold 0.4
+```
+
+If the cart does not jump, rebuild the mod and restart Stardew via SMAPI.
+
+## Current caveats
+
+1. Training runs in real time inside the actual game, so it is slow.
+2. DQN from scratch may require many episodes.
+3. Reward shaping is still simple.
+4. The action space only contains hold/release jump.
+5. Models trained before the jump-control fix should not be trusted.
+
+## Possible next improvements
+
+1. Add a heuristic teacher for warm starts.
+2. Add semantic track features such as gap width and landing height.
+3. Add accelerated simulation mode in the mod.
+4. Add curriculum training by starting from specific levels/themes.
+5. Save gameplay snapshots or videos for debugging.

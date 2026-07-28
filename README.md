@@ -1,134 +1,234 @@
-# Stardew Valley Junimo Kart RL Bridge
+# Stardew Valley Junimo Kart Deep Q-Network (DQN)
 
-Eksperimen ini memakai opsi “proper”: sebuah SMAPI mod membaca state internal Junimo Kart dan membuka local TCP bridge untuk Python RL agent.
+This project is a reinforcement learning experiment for Stardew Valley's Junimo Kart minigame.
 
-Target awalnya bukan langsung “agent jago”, tapi pipeline yang benar:
+Instead of using screen capture, it uses a SMAPI mod to read Junimo Kart's internal game state directly and exposes that state through a local TCP bridge. A Python Gymnasium environment then trains a DQN agent to control the cart by holding or releasing jump.
 
-1. Stardew Valley + SMAPI menjalankan mod.
-2. Python bisa start Junimo Kart Progress Mode.
-3. Python menerima observation internal, bukan screen capture.
-4. Python mengirim action `release jump` / `hold jump`.
-5. Training RL bisa dilakukan di atas environment Gymnasium.
+The first goal is not instant mastery. The goal is to build a reliable pipeline:
 
-## Struktur
+1. Stardew Valley runs with SMAPI.
+2. The SMAPI mod starts Junimo Kart Progress Mode.
+3. Python receives internal observations, not raw pixels.
+4. Python sends jump actions back to the game.
+5. Stable-Baselines3 trains a DQN agent.
+6. Training logs, plots, checkpoints, and model comparisons are saved for analysis.
 
-- `src/JunimoKartRLBridge/` — SMAPI mod C#.
-- `junimo_rl/` — Python TCP client + Gymnasium environment.
-- `scripts/smoke_test.py` — cek koneksi bridge dan start minigame.
-- `scripts/train_dqn.py` — contoh training Stable-Baselines3 DQN.
+## Project structure
 
-## Setup cepat
+```text
+src/JunimoKartRLBridge/   SMAPI mod written in C#
+junimo_rl/                Python TCP client and Gymnasium environment
+scripts/                  Smoke test, training, plotting, and evaluation scripts
+docs/                     Detailed code walkthrough
+logs/                     Training logs, ignored by Git
+models/                   Saved models, ignored by Git
+```
 
-Pastikan:
+## Requirements
 
-- Stardew Valley sudah terinstall.
-- SMAPI sudah terinstall dan game bisa dibuka lewat `StardewModdingAPI.exe`.
-- .NET 6 SDK tersedia.
-- Python 3.10+ tersedia.
+- Stardew Valley 1.6+
+- SMAPI
+- .NET 6 SDK
+- Python 3.10+
+- Windows PowerShell or Command Prompt
 
-Build mod:
+## Build the SMAPI mod
+
+Close Stardew Valley before building. If the game is running, Windows may lock the mod DLL and deployment can fail.
 
 ```powershell
+cd "C:\Users\VICTUS\OneDrive\Documents\Stardew Valley Reinforcement Learning"
 dotnet build .\src\JunimoKartRLBridge\JunimoKartRLBridge.csproj -c Release
 ```
 
-`Pathoschild.Stardew.ModBuildConfig` biasanya otomatis deploy hasil build ke folder `Stardew Valley\Mods`. Kalau tidak, copy folder hasil build dari `src\JunimoKartRLBridge\bin\Release\net6.0\JunimoKartRLBridge` ke:
+The `Pathoschild.Stardew.ModBuildConfig` package should automatically copy the mod to:
 
 ```text
 C:\Program Files (x86)\Steam\steamapps\common\Stardew Valley\Mods\JunimoKartRLBridge
 ```
 
-Install dependency Python:
+## Install Python dependencies
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .[train]
+pip install -e ".[train,analysis]"
 ```
 
-Jalankan game lewat SMAPI, load save, lalu di terminal project:
+## Start Stardew Valley through SMAPI
+
+PowerShell:
+
+```powershell
+& "C:\Program Files (x86)\Steam\steamapps\common\Stardew Valley\StardewModdingAPI.exe"
+```
+
+Command Prompt:
+
+```cmd
+"C:\Program Files (x86)\Steam\steamapps\common\Stardew Valley\StardewModdingAPI.exe"
+```
+
+Load a save until you are inside the farm/world. You do not need to walk to the arcade machine; the bridge can start Junimo Kart directly.
+
+## Smoke test
+
+Start Junimo Kart Progress Mode and print the internal state:
 
 ```powershell
 python .\scripts\smoke_test.py --start
 ```
 
-Kalau berhasil, script akan menerima JSON state dari Junimo Kart.
+Expected signs:
+
+```json
+"inMinigame": true
+"gameMode": 2
+```
+
+Test jump control:
+
+```powershell
+python .\scripts\smoke_test.py --start --hold 0.4
+```
+
+The cart should visibly jump. If it does not, do not start training yet.
 
 ## Training
 
-Dengan game tetap berjalan dan save sudah loaded:
+Train for 1,000 episodes and save a model checkpoint every 100 episodes:
 
 ```powershell
-python .\scripts\train_dqn.py --timesteps 100000 --model-path models\junimo_dqn
+python .\scripts\train_dqn.py --episodes 1000 --save-episode-freq 100 --frame-skip 2 --model-path models\junimo_dqn --run-name ep_compare_01
 ```
 
-Setiap run training menyimpan:
-
-- `logs\<run-name>\monitor.csv` — reward dan panjang tiap episode.
-- `logs\<run-name>\hparams.txt` — hyperparameter run.
-- `logs\<run-name>\checkpoints\` — checkpoint model berkala.
-- `logs\<run-name>\tensorboard\` — log TensorBoard.
-
-Plot cepat dari CSV:
+Train from scratch up to 10,000 episodes and save every 1,000 episodes:
 
 ```powershell
-pip install -e .[analysis]
-python .\scripts\plot_training.py .\logs\<run-name>\monitor.csv
+python .\scripts\train_dqn.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --model-path models\junimo_dqn --run-name fresh_10k
 ```
 
-TensorBoard:
-
-```powershell
-tensorboard --logdir .\logs
-```
-
-Save model setiap N episode:
-
-```powershell
-python .\scripts\train_dqn.py --episodes 1000 --save-episode-freq 100 --model-path models\junimo_dqn --run-name ep_compare_01
-```
-
-Checkpoint akan muncul di `logs\ep_compare_01\checkpoints\` dengan nama seperti:
-
-```text
-junimo_dqn_ep000100_steps12345.zip
-junimo_dqn_ep000200_steps23456.zip
-```
-
-Lanjut dari model yang sudah pernah dilatih 1000 episode, lalu simpan checkpoint kumulatif 2000, 3000, dst:
+Continue from a previously trained 1,000-episode model and save cumulative checkpoints at 2,000, 3,000, etc.:
 
 ```powershell
 python .\scripts\train_dqn.py --load-model models\junimo_dqn.zip --episodes 9000 --episode-offset 1000 --save-episode-freq 1000 --frame-skip 2 --model-path models\junimo_dqn --run-name continue_to_10k
 ```
 
-Bandingkan beberapa checkpoint:
+## Training outputs
+
+Each run creates:
+
+```text
+logs/<run-name>/monitor.csv          Episode rewards and episode lengths
+logs/<run-name>/hparams.txt          Hyperparameters for the run
+logs/<run-name>/checkpoints/         Periodic model checkpoints
+logs/<run-name>/tensorboard/         TensorBoard logs
+models/junimo_dqn.zip                Final model
+```
+
+Example episode checkpoints:
+
+```text
+junimo_dqn_ep000100_steps6241.zip
+junimo_dqn_ep001000_steps58633.zip
+```
+
+## Plot training curves
 
 ```powershell
-python .\scripts\evaluate_models.py .\logs\ep_compare_01\checkpoints\junimo_dqn_ep000100_*.zip .\logs\ep_compare_01\checkpoints\junimo_dqn_ep001000_*.zip --episodes 20 --out logs\ep_compare_01\evaluation.csv
+python .\scripts\plot_training.py .\logs\ep_compare_01\monitor.csv
 ```
 
-Catatan: training real-time di game asli akan lambat karena game tetap berjalan sekitar 60 FPS. Ini fondasi yang bersih; kalau nanti mau training cepat, langkah berikutnya adalah menambah mode “accelerated simulation” di mod.
+Output:
 
-## Protocol singkat
-
-Bridge listen di `127.0.0.1:8765` dan memakai JSON-lines.
-
-Request:
-
-```json
-{"type":"ping"}
-{"type":"state"}
-{"type":"start","mode":"progress"}
-{"type":"action","jump":true}
-{"type":"action","jump":false}
+```text
+logs\ep_compare_01\training_plot.png
 ```
 
-Response selalu:
+## TensorBoard
 
-```json
-{"ok":true,"type":"state","message":null,"state":{...}}
+```powershell
+tensorboard --logdir .\logs
 ```
 
-## Catatan etika/achievement
+## Compare checkpoints
 
-SMAPI sendiri kompatibel dengan Steam achievements, tapi ini tetap automation/modding. Pakai di single-player save pribadi saja. Kalau tujuanmu hanya mendapat arcade machine, ini tidak perlu menyentuh leaderboard Endless Mode.
+Make sure Stardew Valley is open through SMAPI and a save is loaded, because evaluation also runs the model inside the live game.
+
+```powershell
+python .\scripts\evaluate_models.py ".\logs\ep_compare_01\checkpoints\junimo_dqn_ep*.zip" --episodes 20 --out logs\ep_compare_01\evaluation.csv
+```
+
+View the result:
+
+```powershell
+Import-Csv .\logs\ep_compare_01\evaluation.csv | Format-Table
+```
+
+## How the agent learns
+
+The action space is intentionally small:
+
+```text
+0 = release jump
+1 = hold jump
+```
+
+Jump duration is not a separate action. It emerges from repeated actions over time:
+
+```text
+1, 1, 1, 1, 0
+```
+
+means the agent held jump for four environment steps and then released it.
+
+The DQN learns a function:
+
+```text
+Q(state, action)
+```
+
+which estimates how valuable each action is from the current game state.
+
+The reward function currently rewards:
+
+- moving forward,
+- gaining score,
+- beating a level,
+- completing Progress Mode,
+
+and penalizes:
+
+- losing lives,
+- game over,
+- leaving the minigame.
+
+The agent does not see raw pixels. It receives internal game-state features such as:
+
+- cart position,
+- cart velocity,
+- grounded/jumping flags,
+- track tiles ahead,
+- track type,
+- obstacle/pickup entities ahead,
+- score,
+- lives,
+- current level/theme.
+
+## Important notes
+
+- Training is real-time because it runs inside the actual Stardew Valley game loop.
+- Do not manually press Space during training; it can corrupt the training data.
+- Disable or force off "pause when unfocused" so the game keeps running while the window is not active.
+- Do not minimize the game window completely if it causes rendering or update throttling.
+- Models trained before the jump-control fix should not be trusted.
+
+## Ethics / achievement note
+
+This is intended for single-player experimentation and learning. SMAPI can coexist with Steam achievements, but this is still automation/modding. Avoid using it for leaderboard manipulation or anything that affects other players.
+
+## More documentation
+
+See the detailed walkthrough:
+
+[docs/CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md)
