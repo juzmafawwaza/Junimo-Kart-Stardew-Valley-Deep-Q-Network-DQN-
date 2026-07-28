@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.scratch/
+*.egg-info/
+
+bin/
+obj/
+*.user
+*.suo
+
+.scratch/MetadataProbe/bin/
+.scratch/MetadataProbe/obj/
+models/
+logs/

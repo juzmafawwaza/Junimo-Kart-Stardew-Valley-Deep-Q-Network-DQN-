@@ -1,0 +1,10 @@
+{
+  "Name": "Junimo Kart RL Bridge",
+  "Author": "Local",
+  "Version": "%ProjectVersion%",
+  "Description": "Exposes Junimo Kart internal state and jump control over a localhost JSON-lines TCP bridge for reinforcement learning experiments.",
+  "UniqueID": "Local.JunimoKartRLBridge",
+  "EntryDll": "JunimoKartRLBridge.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}

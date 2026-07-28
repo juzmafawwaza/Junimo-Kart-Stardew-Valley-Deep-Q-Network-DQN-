@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "junimo-kart-rl"
+version = "0.1.0"
+description = "Python client and Gymnasium environment for the Stardew Valley Junimo Kart RL Bridge SMAPI mod."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "gymnasium>=0.29",
+]
+
+[project.optional-dependencies]
+train = [
+  "stable-baselines3>=2.3",
+  "torch>=2.0",
+  "tensorboard>=2.16",
+]
+analysis = [
+  "matplotlib>=3.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["junimo_rl*"]
