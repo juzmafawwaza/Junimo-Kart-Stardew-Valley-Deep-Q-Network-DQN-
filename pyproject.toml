@@ -14,7 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 train = [
-  "stable-baselines3>=2.3",
+  "stable-baselines3>=2.9",
+  "sb3-contrib>=2.9",
   "torch>=2.0",
   "tensorboard>=2.16",
 ]
@@ -24,4 +25,4 @@ analysis = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["junimo_rl*"]
+include = ["junimo_rl*", "junimo_det*"]

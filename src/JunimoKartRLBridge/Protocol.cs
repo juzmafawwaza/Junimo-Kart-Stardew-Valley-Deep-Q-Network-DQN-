@@ -82,6 +82,7 @@ internal sealed class PlayerSnapshot
     public BoundsSnapshot? Bounds { get; set; }
     public bool Grounded { get; set; }
     public bool Jumping { get; set; }
+    public bool JumpReady { get; set; }
     public string CurrentTrackType { get; set; } = "";
     public int CurrentTrackTypeId { get; set; }
 }
@@ -91,6 +92,7 @@ internal sealed class TrackSnapshot
     public float X { get; set; }
     public float Y { get; set; }
     public float Dx { get; set; }
+    public BoundsSnapshot? Bounds { get; set; }
     public string Type { get; set; } = "";
     public int TypeId { get; set; }
     public bool HasObstacle { get; set; }
@@ -100,6 +102,7 @@ internal sealed class TrackSnapshot
 
 internal sealed class EntitySnapshot
 {
+    public int Id { get; set; }
     public string Type { get; set; } = "";
     public float X { get; set; }
     public float Y { get; set; }

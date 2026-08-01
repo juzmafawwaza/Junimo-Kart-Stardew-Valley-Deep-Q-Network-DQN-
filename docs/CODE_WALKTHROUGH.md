@@ -20,7 +20,7 @@ The project has two main parts:
 Data flow:
 
 ```text
-Python DQN agent
+Python RL agent
   -> chooses action: release jump / hold jump
   -> sends JSON to the local TCP bridge
   -> SMAPI mod receives the action
@@ -28,7 +28,7 @@ Python DQN agent
   -> game advances for a few frames
   -> mod reads Junimo Kart's internal state
   -> Python receives an observation and computes reward
-  -> DQN learns from the transition
+  -> DQN or PPO learns from the transition
 ```
 
 The bridge listens on:
@@ -307,6 +307,25 @@ Jump duration emerges from repeated actions. For example:
 
 means the agent held jump for four environment steps and then released it.
 
+Optional macro action mode is enabled with:
+
+```powershell
+--action-mode macro
+```
+
+Macro action space:
+
+```text
+0 = release jump
+1 = short hold
+2 = medium hold
+3 = long/continue hold
+```
+
+With `--macro-action-frames 8`, each macro action controls an eight-frame window. Action `1` holds jump for roughly 25% of that window, action `2` for roughly 50%, and action `3` for the full window. This gives the agent a cleaner way to express jump duration.
+
+Binary-action checkpoints and macro-action checkpoints are not compatible because the policy output size changes.
+
 #### Snapshot creation
 
 `CreateSnapshot` reads internal game state:
@@ -403,7 +422,30 @@ MAX_ENTITIES = 24
 
 If there are fewer entries, the rest are padded with zeros. Neural networks need a fixed input size.
 
+Optional semantic features can be enabled through `use_semantic_features=True` or the training flag `--semantic-features`.
+
+These features are derived from the same track/entity snapshot, but they describe useful gameplay concepts directly:
+
+- next visible track distance, height, type, and obstacle flag;
+- whether a gap is visible soon;
+- next gap start distance;
+- next gap width;
+- landing height;
+- landing height delta compared to takeoff;
+- next obstacle distance and height;
+- next pickup distance and height;
+- distance to finish;
+- progress fraction.
+
+Gap detection is currently heuristic. The bridge exposes track positions, not the physical width of each track piece, so Python infers a gap when the distance between two forward track pieces is larger than `GAP_PIXEL_THRESHOLD`.
+
+The `shaped_v2` gap-landing reward uses a stricter tracked-attempt rule: the inferred gap must be at least `GAP_LANDING_REWARD_MIN_WIDTH` (`56px`) and its start must be within `GAP_LANDING_REWARD_ACTIVATION_DX` (`180px`) ahead of the cart.
+
+This changes the observation vector size. Legacy models trained without semantic features must be evaluated without `--semantic-features`; models trained with semantic features must be evaluated with it.
+
 #### Action space
+
+Default binary mode:
 
 ```python
 spaces.Discrete(2)
@@ -415,6 +457,23 @@ Meaning:
 0 = release jump
 1 = hold jump
 ```
+
+Optional macro mode:
+
+```python
+spaces.Discrete(4)
+```
+
+Meaning:
+
+```text
+0 = release jump
+1 = short hold
+2 = medium hold
+3 = long/continue hold
+```
+
+Macro mode is enabled with `--action-mode macro`.
 
 #### Reset
 
@@ -430,15 +489,16 @@ Meaning:
 `step(action)`:
 
 1. stores the previous snapshot;
-2. sends the jump action;
-3. waits `frame_skip / fps` seconds;
-4. reads the new snapshot;
-5. computes reward;
-6. returns `(obs, reward, terminated, truncated, info)`.
+2. applies the action;
+3. in binary mode, sends hold/release and waits `frame_skip / fps` seconds;
+4. in macro mode, holds jump for part or all of the macro action window;
+5. reads the new snapshot;
+6. computes reward;
+7. returns `(obs, reward, terminated, truncated, info)`.
 
 #### Reward function
 
-Current reward:
+Legacy reward:
 
 ```text
 reward =
@@ -461,6 +521,58 @@ Interpretation:
 
 There is no explicit penalty for missing a coin or fruit. The agent simply does not get the score reward.
 
+Optional shaped reward `shaped_v1` is enabled with:
+
+```powershell
+--reward-version shaped_v1
+```
+
+It uses denser signals:
+
+```text
+reward =
+  0.003 * delta_x
++ 0.02  * delta_score
++ 100   * max(delta_level, 0)
++ 25    * delta_life
++ 0.02  per alive gameplay step
++ small bonus for jumping near a detected gap
+- small penalty for not jumping near a close gap
+- small penalty for unnecessary grounded jump holds
++ small bonus for safe landing
++ 500   if Progress Mode is completed
+- 80    if game over just happened
+- 2     if the minigame is no longer active
+```
+
+Optional shaped reward `shaped_v2` is enabled with:
+
+```powershell
+--reward-version shaped_v2
+```
+
+It is more outcome-based:
+
+```text
+reward =
+  0.004 * delta_x
++ 0.005 * delta_score
++ 120   * max(delta_level, 0)
++ 25    * delta_life
++ 0.03  per alive gameplay step
++ bonus only when a tracked gap is crossed and the cart lands safely
+- small penalty for not holding jump when a real gap is very close
+- small penalty for unnecessary grounded jump holds
++ 600   if Progress Mode is completed
+- 80    if game over just happened
+- extra small penalty if a tracked gap attempt ends in game over
+- 2     if the minigame is no longer active
+```
+
+`shaped_v2` reduces score reward so coins/fruits are not over-prioritized when survival is still weak. It also removes the general safe-landing bonus from `shaped_v1`; landing reward is only given for a tracked gap attempt.
+
+This reward is not directly comparable to legacy reward values. For paper comparisons across reward versions, prefer game metrics such as score, levels beaten, and completion rate, or train all compared algorithms with the same reward version.
+
 ## Scripts
 
 ### `scripts/smoke_test.py`
@@ -482,6 +594,31 @@ python .\scripts\smoke_test.py --start --hold 0.4
 
 If jump control works, the cart should visibly jump and the `duringHold` state should show `jumpHeld: true`.
 
+### `scripts/inspect_semantic_features.py`
+
+Live debugging script for the engineered semantic features.
+
+It repeatedly reads the bridge state and prints:
+
+- cart x position;
+- grounded flag;
+- next gap presence;
+- next gap start distance;
+- next gap width;
+- landing height;
+- landing height delta;
+- next obstacle distance;
+- next pickup distance;
+- progress fraction.
+
+Example:
+
+```powershell
+python .\scripts\inspect_semantic_features.py --interval 0.25
+```
+
+This is useful before semantic training because it lets you verify whether the Python side is detecting gaps and landing points in a reasonable way.
+
 ### `scripts/train_dqn.py`
 
 Training script using Stable-Baselines3 DQN.
@@ -500,6 +637,12 @@ Example:
 
 ```powershell
 python .\scripts\train_dqn.py --episodes 1000 --save-episode-freq 100 --model-path models\junimo_dqn --run-name ep_compare_01
+```
+
+Semantic/shaped DQN example:
+
+```powershell
+python .\scripts\train_dqn.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --semantic-features --reward-version shaped_v1 --log-dir logs\dqn_semantic --model-path models\dqn_semantic\junimo_dqn_semantic --run-name dqn_semantic_shaped_10k
 ```
 
 Outputs:
@@ -523,6 +666,106 @@ Checkpoint names:
 ```text
 junimo_dqn_ep001000_steps58633.zip
 junimo_dqn_ep002000_steps119000.zip
+```
+
+Important disk note: DQN can save replay buffers. Replay buffer files are useful for exact training continuation, but they are much larger than model `.zip` checkpoints. For analysis and deterministic evaluation, the model `.zip`, `monitor.csv`, `hparams.txt`, and `evaluation.csv` are usually enough.
+
+The DQN script now saves replay buffers only when `--save-replay-buffer` is passed.
+
+### `scripts/train_ppo.py`
+
+Training script using Stable-Baselines3 PPO.
+
+It uses the same `JunimoKartEnv` environment as DQN. The SMAPI bridge and observation vector do not change; only the learning algorithm changes.
+
+Default PPO output folders:
+
+```text
+logs/ppo/<run-name>/
+models/ppo/
+```
+
+Example:
+
+```powershell
+python .\scripts\train_ppo.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --model-path models\ppo\junimo_ppo --run-name ppo_10k
+```
+
+Semantic/shaped PPO example:
+
+```powershell
+python .\scripts\train_ppo.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --semantic-features --reward-version shaped_v1 --model-path models\ppo\junimo_ppo_semantic --run-name ppo_semantic_shaped_10k
+```
+
+Recommended macro-action PPO example:
+
+```powershell
+python .\scripts\train_ppo.py --episodes 5000 --save-episode-freq 1000 --save-freq 0 --frame-skip 2 --semantic-features --reward-version shaped_v2 --action-mode macro --macro-action-frames 8 --model-path models\ppo\junimo_ppo_macro_v2 --run-name ppo_semantic_shaped_v2_macro_5k
+```
+
+Equivalent launcher script:
+
+```powershell
+.\scripts\run_ppo_macro_v2.ps1
+```
+
+Outputs:
+
+```text
+logs/ppo/ppo_10k/monitor.csv
+logs/ppo/ppo_10k/hparams.txt
+logs/ppo/ppo_10k/checkpoints/
+logs/ppo/ppo_10k/tensorboard/
+models/ppo/junimo_ppo.zip
+```
+
+PPO does not use a DQN-style replay buffer, so checkpoints are much smaller. This is intentional to avoid filling the C: drive with large `*_replay_buffer_*.pkl` files.
+
+The script includes an optional `EpisodeProgressCallback`, which can print a compact progress line every N completed episodes.
+
+It is disabled by default so the terminal shows only the standard Stable-Baselines3 training tables.
+
+If enabled, the extra line looks like:
+
+```text
+PPO episode progress | episodes=4 | total_timesteps=... | recent_reward_mean=... | recent_length_mean=...
+```
+
+Useful options:
+
+- `--progress-episode-freq`: print every N completed episodes; default `0` disables it.
+- `--progress-window`: number of recent episodes used for the printed rolling means.
+
+Important PPO hyperparameters:
+
+- `n_steps`: rollout length before each PPO update.
+- `batch_size`: minibatch size during policy updates.
+- `n_epochs`: how many passes PPO makes over each rollout.
+- `gae_lambda`: bias/variance tradeoff for advantage estimation.
+- `clip_range`: limits how much the policy can change per update.
+- `ent_coef`: entropy bonus; higher values encourage more exploration.
+
+Conceptually:
+
+```text
+DQN learns Q(state, action).
+PPO learns policy(action | state).
+```
+
+By default, both algorithms choose between the same two actions:
+
+```text
+0 = release jump
+1 = hold jump
+```
+
+With `--action-mode macro`, they choose between four duration-oriented actions:
+
+```text
+0 = release jump
+1 = short hold
+2 = medium hold
+3 = long/continue hold
 ```
 
 ### `scripts/plot_training.py`
@@ -550,7 +793,7 @@ logs/ep_compare_01/training_plot.png
 
 ### `scripts/evaluate_models.py`
 
-Evaluates one or more checkpoints deterministically.
+Evaluates one or more DQN checkpoints deterministically.
 
 Training uses exploration/randomness. Evaluation should be deterministic so checkpoints are compared more fairly.
 
@@ -562,12 +805,34 @@ python .\scripts\evaluate_models.py ".\logs\ep_compare_01\checkpoints\junimo_dqn
 
 Output columns:
 
+- algorithm;
 - model path;
+- semantic feature flag;
+- reward version;
+- action mode;
+- macro action frames;
 - number of evaluation episodes;
 - mean reward;
 - mean episode length;
+- mean score;
+- max score;
+- mean levels beaten;
+- max levels beaten;
 - completion rate;
-- max levels beaten.
+- game over rate;
+- jump hold ratio.
+
+### `scripts/evaluate_ppo_models.py`
+
+Evaluates one or more PPO checkpoints deterministically.
+
+Command:
+
+```powershell
+python .\scripts\evaluate_ppo_models.py ".\logs\ppo\ppo_10k\checkpoints\junimo_ppo_ep*.zip" --episodes 20 --frame-skip 2 --out logs\ppo\ppo_10k\evaluation.csv
+```
+
+The output columns intentionally match the DQN evaluator, so DQN and PPO can be compared in the same Excel workbook or paper table.
 
 Evaluation still requires Stardew + SMAPI + bridge to be running. If the game closes, the script stops with a clear message.
 
@@ -599,11 +864,20 @@ The network is trained to reduce:
 loss = (Q(state, action) - target)^2
 ```
 
-With two actions, the network outputs two values:
+In binary mode, the network outputs two values:
 
 ```text
 Q(state, release)
 Q(state, hold)
+```
+
+In macro mode, the network outputs four values:
+
+```text
+Q(state, release)
+Q(state, short_hold)
+Q(state, medium_hold)
+Q(state, long_hold)
 ```
 
 The agent usually picks:
@@ -660,7 +934,7 @@ dx=160
 dx=176
 ```
 
-The current model receives this raw list. A future improvement would add semantic features like:
+Legacy models receive this raw list. New semantic-feature runs append engineered features like:
 
 ```text
 next_gap_start
@@ -671,7 +945,7 @@ next_obstacle_dx
 next_obstacle_type
 ```
 
-That would make learning easier.
+These features make the geometry easier for a dense network to interpret without learning every gap concept from raw track-piece sequences.
 
 ## Hyperparameters
 
@@ -723,6 +997,71 @@ Recommended for Junimo Kart:
 ```text
 2
 ```
+
+### `--action-mode`
+
+Selects the action representation:
+
+```text
+binary
+macro
+```
+
+`binary` is the legacy two-action mode:
+
+```text
+0 = release jump
+1 = hold jump
+```
+
+`macro` exposes jump duration as four discrete actions:
+
+```text
+0 = release jump
+1 = short hold
+2 = medium hold
+3 = long/continue hold
+```
+
+Models trained with `binary` cannot be loaded with `macro`, and macro models cannot be loaded with `binary`.
+
+### `--macro-action-frames`
+
+Total frame window for each macro action. The default is:
+
+```text
+8
+```
+
+This option only affects `--action-mode macro`.
+
+### `--semantic-features`
+
+Appends engineered gap, landing, obstacle, pickup, finish-distance, and progress-fraction features to the observation vector.
+
+Use this only for new models:
+
+```powershell
+--semantic-features
+```
+
+Do not use it when evaluating legacy DQN checkpoints trained without semantic features.
+
+### `--reward-version`
+
+Selects the reward function:
+
+```text
+legacy
+shaped_v1
+shaped_v2
+```
+
+`legacy` preserves compatibility with previous runs. `shaped_v1` adds denser progress, survival, gap timing, and general landing signals. `shaped_v2` shifts the reward toward outcome-based gap crossing and reduces coin/fruit chasing.
+
+### `--save-replay-buffer`
+
+DQN-only. Saves replay buffers next to checkpoints. This is disabled by default because replay buffers can consume many gigabytes.
 
 ### `--learning-rate`
 
@@ -801,22 +1140,30 @@ dotnet build .\src\JunimoKartRLBridge\JunimoKartRLBridge.csproj -c Release
 python .\scripts\smoke_test.py --start --hold 0.4
 ```
 
-6. Train:
+6. Train a DQN baseline:
 
 ```powershell
 python .\scripts\train_dqn.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --model-path models\junimo_dqn --run-name fresh_10k
+```
+
+Or train a PPO baseline:
+
+```powershell
+python .\scripts\train_ppo.py --episodes 10000 --save-episode-freq 1000 --frame-skip 2 --model-path models\ppo\junimo_ppo --run-name ppo_10k
 ```
 
 7. Plot:
 
 ```powershell
 python .\scripts\plot_training.py .\logs\fresh_10k\monitor.csv
+python .\scripts\plot_training.py .\logs\ppo\ppo_10k\monitor.csv
 ```
 
 8. Evaluate checkpoints:
 
 ```powershell
 python .\scripts\evaluate_models.py ".\logs\fresh_10k\checkpoints\junimo_dqn_ep*.zip" --episodes 20 --out logs\fresh_10k\evaluation.csv
+python .\scripts\evaluate_ppo_models.py ".\logs\ppo\ppo_10k\checkpoints\junimo_ppo_ep*.zip" --episodes 20 --frame-skip 2 --out logs\ppo\ppo_10k\evaluation.csv
 ```
 
 ## Troubleshooting
@@ -864,15 +1211,18 @@ If the cart does not jump, rebuild the mod and restart Stardew via SMAPI.
 ## Current caveats
 
 1. Training runs in real time inside the actual game, so it is slow.
-2. DQN from scratch may require many episodes.
+2. DQN and PPO from scratch may require many episodes.
 3. Reward shaping is still simple.
-4. The action space only contains hold/release jump.
+4. Macro action mode is experimental and creates checkpoints that are incompatible with binary-action checkpoints.
 5. Models trained before the jump-control fix should not be trusted.
 
 ## Possible next improvements
 
 1. Add a heuristic teacher for warm starts.
-2. Add semantic track features such as gap width and landing height.
-3. Add accelerated simulation mode in the mod.
-4. Add curriculum training by starting from specific levels/themes.
-5. Save gameplay snapshots or videos for debugging.
+2. Evaluate semantic/shaped PPO against macro-action PPO.
+3. Add a heuristic teacher for warm starts.
+4. Add Recurrent PPO / PPO-LSTM.
+5. Add DRQN for DQN + memory comparisons.
+6. Add accelerated simulation mode in the mod.
+7. Add curriculum training by starting from specific levels/themes.
+8. Save gameplay snapshots or videos for debugging.

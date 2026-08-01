@@ -1,4 +1,10 @@
 from .client import JunimoKartBridgeClient
-from .env import JunimoKartEnv
+from .env import COMPACT_FEATURES, JunimoKartEnv, TELEMETRY_INFO_KEYS, compact_feature_vector
 
-__all__ = ["JunimoKartBridgeClient", "JunimoKartEnv"]
+__all__ = [
+    "COMPACT_FEATURES",
+    "JunimoKartBridgeClient",
+    "JunimoKartEnv",
+    "TELEMETRY_INFO_KEYS",
+    "compact_feature_vector",
+]

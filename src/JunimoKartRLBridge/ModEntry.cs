@@ -1,5 +1,6 @@
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Input;
+using System.Runtime.CompilerServices;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
@@ -251,10 +252,14 @@ public sealed class ModEntry : Mod
     {
         var player = ReflectionUtil.Field(mineCart, "player");
         ReflectionUtil.SetField(mineCart, "isJumpPressed", desiredJump);
+        bool grounded = ReflectionUtil.BoolMethod(player, "IsGrounded", ReflectionUtil.Field<bool>(player, "_grounded"));
 
         if (desiredJump)
         {
-            if (!this.actualJumpHeld)
+            // A rising edge while airborne used to QueueJump and could silently
+            // buffer a jump for the next landing. Real player control requires a
+            // fresh press from the ground, so airborne re-presses are ignored.
+            if (!this.actualJumpHeld && grounded)
                 ReflectionUtil.Invoke(player, "QueueJump");
         }
         else
@@ -276,6 +281,7 @@ public sealed class ModEntry : Mod
         var levelsBeat = ReflectionUtil.Field<int>(mineCart, "levelsBeat");
         var gameOver = ReflectionUtil.Field<bool>(mineCart, "gameOver");
         var reachedFinish = ReflectionUtil.Field<bool>(mineCart, "reachedFinish");
+        var grounded = ReflectionUtil.BoolMethod(player, "IsGrounded", ReflectionUtil.Field<bool>(player, "_grounded"));
 
         var snapshot = new BridgeSnapshot
         {
@@ -304,8 +310,9 @@ public sealed class ModEntry : Mod
                 Position = ReflectionUtil.Vector(playerPosition),
                 Velocity = ReflectionUtil.Vector(playerVelocity),
                 Bounds = ReflectionUtil.Bounds(player),
-                Grounded = ReflectionUtil.BoolMethod(player, "IsGrounded", ReflectionUtil.Field<bool>(player, "_grounded")),
+                Grounded = grounded,
                 Jumping = ReflectionUtil.BoolMethod(player, "IsJumping", ReflectionUtil.Field<bool>(player, "_jumping")),
+                JumpReady = grounded && !this.actualJumpHeld,
                 CurrentTrackType = currentTrackType?.ToString() ?? "",
                 CurrentTrackTypeId = ReflectionUtil.EnumId(currentTrackType)
             }
@@ -338,6 +345,7 @@ public sealed class ModEntry : Mod
             X = position.X,
             Y = position.Y,
             Dx = position.X - playerX,
+            Bounds = ReflectionUtil.Bounds(track),
             Type = trackType?.ToString() ?? "",
             TypeId = ReflectionUtil.EnumId(trackType),
             HasObstacle = obstacle is not null,
@@ -364,6 +372,7 @@ public sealed class ModEntry : Mod
         var position = ReflectionUtil.VectorField(entity, "position");
         return new EntitySnapshot
         {
+            Id = RuntimeHelpers.GetHashCode(entity),
             Type = entity.GetType().Name,
             X = position.X,
             Y = position.Y,

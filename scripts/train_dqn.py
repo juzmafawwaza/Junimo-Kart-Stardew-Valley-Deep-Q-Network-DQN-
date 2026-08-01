@@ -11,7 +11,7 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, StopTrainingOnMaxEpisodes
 from stable_baselines3.common.monitor import Monitor
 
-from junimo_rl import JunimoKartEnv
+from junimo_rl import JunimoKartEnv, TELEMETRY_INFO_KEYS
 
 
 class EpisodeCheckpointCallback(BaseCallback):
@@ -76,7 +76,21 @@ def main() -> None:
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--save-freq", type=int, default=5_000)
     parser.add_argument("--save-episode-freq", type=int, default=100, help="Save a comparable model checkpoint every N completed episodes. Set 0 to disable.")
+    parser.add_argument("--save-replay-buffer", action="store_true", help="Also save DQN replay buffers. This can use a lot of disk space.")
     parser.add_argument("--frame-skip", type=int, default=4)
+    parser.add_argument("--semantic-features", action="store_true", help="Append engineered gap/landing/obstacle/pickup features to the observation vector. Models trained without this flag are not compatible with it.")
+    parser.add_argument("--temporal-features", action="store_true", help="Append timing features such as jump-held duration, airborne duration, grounded duration, and previous action.")
+    parser.add_argument("--reward-version", default="legacy", choices=["legacy", "shaped_v1", "shaped_v2", "shaped_v3", "shaped_v4"], help="Reward function to use.")
+    parser.add_argument("--action-mode", default="binary", choices=["binary", "macro", "tap_macro"], help="Action representation. binary has release/hold; macro adds short/medium/long hold; tap_macro forces a release tail after each jump macro.")
+    parser.add_argument("--macro-action-frames", type=int, default=8, help="Total game frames controlled by each macro action when --action-mode macro/tap_macro is used.")
+    parser.add_argument("--macro-release-frames", type=int, default=1, help="For --action-mode tap_macro, force this many release frames at the end of every jump macro.")
+    parser.add_argument("--score-reward-coef", type=float, default=None, help="Override score reward coefficient. Leave unset for the reward-version default; use 0.0 to ignore coin/fruit score.")
+    parser.add_argument("--coin-reward-coef", type=float, default=None, help="Reward coefficient for detected coin pickups. When set, split pickup reward is used instead of generic score reward.")
+    parser.add_argument("--fruit-reward-coef", type=float, default=None, help="Reward coefficient for detected fruit pickups. Use a higher value than coin if fruit should matter more.")
+    parser.add_argument("--fruit-score-threshold", type=float, default=100.0, help="Fallback: unknown pickup score_delta at/above this value is treated as fruit.")
+    parser.add_argument("--gap-landing-confirm-steps", type=int, default=2, help="For shaped_v3, require this many extra env steps alive after landing before paying the gap landing reward.")
+    parser.add_argument("--gap-landing-base-reward", type=float, default=8.0, help="Base reward paid for a confirmed gap landing in shaped_v4.")
+    parser.add_argument("--gap-landing-width-coef", type=float, default=0.04, help="Extra gap landing reward per pixel of gap width in shaped_v4.")
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--buffer-size", type=int, default=50_000)
     parser.add_argument("--learning-starts", type=int, default=2_000)
@@ -99,8 +113,26 @@ def main() -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     env = Monitor(
-        JunimoKartEnv(host=args.host, port=args.port, frame_skip=args.frame_skip),
+        JunimoKartEnv(
+            host=args.host,
+            port=args.port,
+            frame_skip=args.frame_skip,
+            use_semantic_features=args.semantic_features,
+            use_temporal_features=args.temporal_features,
+            reward_version=args.reward_version,
+            action_mode=args.action_mode,
+            macro_action_frames=args.macro_action_frames,
+            macro_release_frames=args.macro_release_frames,
+            score_reward_coef=args.score_reward_coef,
+            coin_reward_coef=args.coin_reward_coef,
+            fruit_reward_coef=args.fruit_reward_coef,
+            fruit_score_threshold=args.fruit_score_threshold,
+            gap_landing_confirm_steps=args.gap_landing_confirm_steps,
+            gap_landing_base_reward=args.gap_landing_base_reward,
+            gap_landing_width_coef=args.gap_landing_width_coef,
+        ),
         filename=str(run_dir / "monitor.csv"),
+        info_keywords=TELEMETRY_INFO_KEYS,
     )
 
     hparams = {
@@ -112,6 +144,20 @@ def main() -> None:
         "model_path": str(model_path),
         "load_model": args.load_model,
         "frame_skip": args.frame_skip,
+        "semantic_features": args.semantic_features,
+        "temporal_features": args.temporal_features,
+        "reward_version": args.reward_version,
+        "action_mode": args.action_mode,
+        "macro_action_frames": args.macro_action_frames,
+        "macro_release_frames": args.macro_release_frames,
+        "score_reward_coef": args.score_reward_coef,
+        "coin_reward_coef": args.coin_reward_coef,
+        "fruit_reward_coef": args.fruit_reward_coef,
+        "fruit_score_threshold": args.fruit_score_threshold,
+        "gap_landing_confirm_steps": args.gap_landing_confirm_steps,
+        "gap_landing_base_reward": args.gap_landing_base_reward,
+        "gap_landing_width_coef": args.gap_landing_width_coef,
+        "monitor_info_keywords": ",".join(TELEMETRY_INFO_KEYS),
         "learning_rate": args.learning_rate,
         "buffer_size": args.buffer_size,
         "learning_starts": args.learning_starts,
@@ -123,6 +169,7 @@ def main() -> None:
         "exploration_final_eps": args.exploration_final_eps,
         "save_freq": args.save_freq,
         "save_episode_freq": args.save_episode_freq,
+        "save_replay_buffer": args.save_replay_buffer,
     }
     (run_dir / "hparams.txt").write_text(
         "\n".join(f"{key}={value}" for key, value in hparams.items()) + "\n",
@@ -160,7 +207,7 @@ def main() -> None:
                 save_freq=args.save_freq,
                 save_path=str(checkpoint_dir),
                 name_prefix="junimo_dqn_steps",
-                save_replay_buffer=True,
+                save_replay_buffer=args.save_replay_buffer,
                 save_vecnormalize=True,
             )
         )
@@ -171,7 +218,7 @@ def main() -> None:
                 save_path=checkpoint_dir,
                 name_prefix="junimo_dqn",
                 episode_offset=args.episode_offset,
-                save_replay_buffer=True,
+                save_replay_buffer=args.save_replay_buffer,
                 verbose=1,
             )
         )
